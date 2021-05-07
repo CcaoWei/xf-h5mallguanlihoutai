@@ -1,0 +1,155 @@
+def getTEMP_BUILD_DIR(){
+    return '/app'
+}
+
+def getReleaseLog(){
+    def msgs = [];
+    for (int i = currentBuild.changeSets.size()-1; i>-1; i--) {
+        for (int j = currentBuild.changeSets[i].items.length-1; j > -1; j--) {
+            def item = currentBuild.changeSets[i].items[j];
+            msgs.add(item.msg + " " + item.author);
+        }
+    }
+    return "<ul><li>${msgs.join("</li><li>")}</li></ul>";
+}
+
+pipeline {
+    agent any
+    options { skipDefaultCheckout() }
+    environment {
+        SERVICE_DEPLOY_HOST = 'al182_122'
+        REAL_PORJECT_NAME = '微信商城管理后台'
+        DOCKER_NAME = 'wx-mall-management'
+    }
+    parameters {
+        string(defaultValue: "zhaohuaizhi@infohold.com.cn;",
+                description: 'List of email recipients',
+                name: 'EMAIL_RECIPIENTS')
+        booleanParam(defaultValue: false,
+            description: '是否为生产部署',
+            name: 'RELEASE_MODE')
+        booleanParam(defaultValue: false,
+            description: '是否跳过构建，仅重启容器',
+            name: 'SKIP_BUILD')
+    }
+    stages {  
+        stage('debug'){
+            when {
+                expression { return !params.RELEASE_MODE }
+                beforeAgent true
+            }
+            stages { 
+                stage('checkout submodule'){
+                    steps{
+                        checkout scm
+                        sh 'git submodule sync --recursive && git submodule update --init --recursive'
+                    }
+                }
+                stage('build'){
+                    when {
+                        expression { return !params.SKIP_BUILD }
+                        beforeAgent true
+                    }
+                    agent {
+                        docker {
+                            image 'qbcbyb/weex-node:2.3'
+                            args "-v /opt/.npm:/root/.npm -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker"
+                        }
+                    }
+                    steps{
+                        checkout scm
+                        sh 'git submodule sync --recursive && git submodule update --init --recursive'
+                        sh 'npm config set registry http://192.168.10.133:8081/repository/npm_group/'
+                        sh script: 'sed -i "s/registry=http.*$/registry=http:\\/\\/192.168.10.133:8081\\/repository\\/npm_group\\//g" .npmrc', returnStatus: true
+                        sh 'sed -i \"s/https:\\/\\/cdn.npm.taobao.org\\/dist/http:\\/\\/192.168.10.150\\/entrypoint\\/proxy/g\" .npmrc || echo 0 '
+                        sh 'npm install --prefer-offline'
+                        sh 'npm run build:all'
+                        sh """if [ ! -d "${TEMP_BUILD_DIR}" ]; then mkdir -p ${TEMP_BUILD_DIR}; fi"""
+                        sh "rm -rf ${TEMP_BUILD_DIR}/*"
+                        sh "cp Dockerfile ${TEMP_BUILD_DIR} && cp .npmrc ${TEMP_BUILD_DIR} && cp package-lock.json ${TEMP_BUILD_DIR} || echo '' "
+                        sh "mv dist.zip ${TEMP_BUILD_DIR}"
+                        sh "cd ${TEMP_BUILD_DIR} && unzip -o dist.zip && rm -rf dist.zip "
+                        sh "cd ${TEMP_BUILD_DIR} && docker build -t ${DOCKER_NAME} . "
+                        sh "rm -rf ${TEMP_BUILD_DIR}"
+                    }
+                }
+                stage('publish'){
+                    steps{
+                        sh script: "docker rm -f ${DOCKER_NAME}", returnStatus: true
+                        sh "docker run -d --restart=always -v /etc/localtime:/etc/localtime -v /etc/timezone:/etc/timezone -e API_SERVER_URL=http://192.168.10.133:18086 -e ENABLE_ELASTIC_SEARCH_LOG=true -e ENABLE_ETCD_REGISTER=true -e ETCD_REGISTER_HOSTS=172.18.0.15:2379 --network customnetwork --name ${DOCKER_NAME} ${DOCKER_NAME}"
+                    }
+                }
+                stage('notify'){
+                    steps{
+                        emailext body: "${REAL_PORJECT_NAME} 测试版本已部署成功。更新内容如下：<br/>${releaseLog}",
+                                attachLog: true,
+                                compressLog: true,
+                                mimeType: 'text/html',
+                                subject: "${REAL_PORJECT_NAME} ${BUILD_NUMBER} 构建完成",
+                                to: "${params.EMAIL_RECIPIENTS}"
+                    }
+                }
+            }
+        }
+        stage('release'){
+            when {
+                expression { return params.RELEASE_MODE }
+                beforeAgent true
+            }
+            stages {  
+                stage('buildTagAndPush'){
+                    steps{
+                        echo("docker images | grep ")
+                        script {
+                            nowVersion = sh(script: "docker exec ${DOCKER_NAME} cat package.json | grep \\\"version\\\" | sed \"s/[\\\"version:,]//g\"", returnStdout: true).trim()
+                            def result = sh(script: "docker images | grep \"127.0.0.1:5000/${DOCKER_NAME}\\s*${nowVersion.replace(".","\\.")}\" || echo \"\" ", returnStdout: true).trim()
+                            assert (result == null || result == '') : "已存在当前版本镜像，请确认是否为误操作"
+                        }
+                        sh "docker tag ${DOCKER_NAME} 127.0.0.1:5000/${DOCKER_NAME}:${nowVersion}"
+                        sh "docker push 127.0.0.1:5000/${DOCKER_NAME}:${nowVersion}"
+                    }
+                }
+                stage('reloadAly'){
+                    steps{
+                        sh """ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -F ~/.ssh/${SERVICE_DEPLOY_HOST} ${SERVICE_DEPLOY_HOST} \
+                            ' \
+                            docker pull docker-registry.cafewallet.com.cn/${DOCKER_NAME}:${nowVersion} ; \
+                            docker rm -f ${DOCKER_NAME} ; \
+                            docker run -it -d --name ${DOCKER_NAME} \
+                                --restart=always -v /etc/localtime:/etc/localtime -v /etc/timezone:/etc/timezone \
+                                --network customnetwork \
+                                -e ENABLE_ELASTIC_SEARCH_LOG=true \
+                                -e ELASTIC_SEARCH_HOST=115.28.128.210:9200 \
+                                -e DISABLE_VISUAL_DEBUG=true \
+                                -e ENABLE_ETCD_REGISTER=true -e ETCD_REGISTER_HOSTS=172.18.0.15:2379 \
+                                -e API_SERVER_URL=http://172.31.195.109:18086 \
+                                -e NODE_ENV=production \
+                                docker-registry.cafewallet.com.cn/${DOCKER_NAME}:${nowVersion}
+                            '
+                            """
+                    }
+                }
+                stage('notify'){
+                    steps{
+                        emailext body: "${REAL_PORJECT_NAME} 生产版本已部署成功。版本号：${nowVersion}",
+                                attachLog: false,
+                                compressLog: true,
+                                mimeType: 'text/html',
+                                subject: "${REAL_PORJECT_NAME} ${BUILD_NUMBER} 构建完成",
+                                to: "${params.EMAIL_RECIPIENTS}"
+                    }
+                }
+            }
+        }
+    }
+    post{
+        regression{
+            emailext body: "${REAL_PORJECT_NAME} 部署失败。构建地址：${currentBuild.absoluteUrl}。",
+                    attachLog: true,
+                    compressLog: true,
+                    mimeType: 'text/html',
+                    subject: "${REAL_PORJECT_NAME} ${BUILD_NUMBER} 构建失败",
+                    to: "${params.EMAIL_RECIPIENTS}"
+        }
+    }
+}

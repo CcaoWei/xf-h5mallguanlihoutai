@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+        <meta name="renderer" content="webkit" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+        <title>商城管理平台</title>
+        <link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css" />
+        <script type="text/javascript">
+            (function() {
+                // const docEl = document.documentElement;
+                // function resize() {
+                //     let clientWidth = docEl.clientWidth;
+                //     docEl.style.fontSize = 100 * (clientWidth / 1920) + 'px';
+                // }
+                // resize();
+                // window.addEventListener("resize", function(){
+                //     resize();
+                // });
+                var features = ['Map', 'Set', 'Promise', 'fetch', 'Math.cbrt', 'Array.prototype.findIndex'];
+                for (var i = features.length - 1; i > -1; i--) {
+                    try {
+                        if (eval(features[i])) {
+                            features.splice(i, 1);
+                        }
+                    } catch (e) {}
+                }
+                if (features.length) {
+                    var url =
+                        '<script src="<%= polyfillHost %>polyfill.min.js"></' +
+                        'script><script ' +
+                        'src="<%= polyfillHost %>fetch.min.js"></' +
+                        'script>';
+                    document.write(url);
+                }
+            })();
+        </script>
+    </head>
+    <body>
+        <script src="./static/tinymce4.7.5/tinymce.min.js"></script>
+        <div id="app"></div>
+        <!-- built files will be auto injected -->
+    </body>
+</html>
